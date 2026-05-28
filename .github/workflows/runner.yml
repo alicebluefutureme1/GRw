@@ -1,6 +1,10 @@
 name: GHTUN-Runner
 on:
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch: # اجرای دستی از تب Actions
+
+# رفع هشدار Node.js 20 و اجبار به استفاده از Node.js 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   build-and-run:
@@ -13,13 +17,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq wget unzip
-          # Install ngrok agent
+          
+          # نصب ایمن و استاندارد Ngrok Agent
           curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
           echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install ngrok
+          sudo apt-get update && sudo apt-get install -y ngrok
 
       - name: Install Xray Core
         run: |
+          # دانلود و استخراج آخرین نسخه پایدار Xray
           wget -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
           unzip -o /tmp/xray.zip -d /tmp/xray_dist
           sudo mv /tmp/xray_dist/xray /usr/local/bin/xray
@@ -29,31 +35,32 @@ jobs:
         env:
           NGROK_TOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          # Generate UUID and inject into config
+          # ساخت UUID تصادفی و تزریق به کانفیگ
           UUID=$(cat /proc/sys/kernel/random/uuid)
-          sed -i "s/__UUID__/$UUID/" config.json
+          sed -i "s/__UUID__/$UUID/" "$GITHUB_WORKSPACE/config.json"
           
-          # Authenticate ngrok
+          # احراز هویت Ngrok
           ngrok config add-authtoken "$NGROK_TOKEN"
           
-          # Start Xray with absolute config path in background
+          # اجرای Xray در پس‌زمینه با خروجی لاگ اختصاصی
           sudo /usr/local/bin/xray -c "$GITHUB_WORKSPACE/config.json" > /tmp/xray.log 2>&1 &
           
-          # Start ngrok tunnel on port 443
-          ngrok http 443 --log=stdout > /tmp/ngrok_start.log 2>&1 &
+          # اجرای Ngrok روی پورت 443 در پس‌زمینه
+          ngrok http 443 --log=stdout > /tmp/ngrok.log 2>&1 &
           
-          # Wait for the tunnel to initialize
-          sleep 10
+          # فرصت به سیستم برای آماده‌سازی شبکه
+          sleep 12
           
-          # Fetch the public URL
+          # استخراج پورت و آدرس عمومی از API داخلی Ngrok
           PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
           
           if [ -z "$PUBLIC_URL" ] || [ "$PUBLIC_URL" = "null" ]; then
-            echo "❌ Failed to get Ngrok URL. Check logs:"
-            cat /tmp/ngrok_start.log
+            echo "❌ خطا: تونل Ngrok برقرار نشد. لاگ‌ها را بررسی کنید:"
+            cat /tmp/ngrok.log
             exit 1
           fi
           
+          # تمیز کردن آدرس (حذف پروتکل https)
           CLEAN_URL=$(echo $PUBLIC_URL | sed 's/https:\/\///')
           
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -66,7 +73,18 @@ jobs:
           echo "vless://$UUID@$CLEAN_URL:443?encryption=none&security=tls&type=ws&sni=$CLEAN_URL&path=%2Flive-chat#GHTUN_ACTION"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # Keep alive and monitor background processes
-          while kill -0 $(pgrep xray) 2>/dev/null && kill -0 $(pgrep ngrok) 2>/dev/null; do
-            sleep 10
+          # مانیتورینگ زنده پروسه‌ها برای جلوگیری از اتمام بی‌دلیل جاب
+          while true; do
+            if ! pgrep -x "xray" > /dev/null; then
+              echo "❌ هسته Xray متوقف شد."
+              cat /tmp/xray.log
+              exit 1
+            fi
+            
+            if ! pgrep -x "ngrok" > /dev/null; then
+              echo "❌ تونل Ngrok متوقف شد."
+              cat /tmp/ngrok.log
+              exit 1
+            fi
+            sleep 15
           done
